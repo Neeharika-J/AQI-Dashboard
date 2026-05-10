@@ -26,7 +26,9 @@ and helps you discover nearby green 🌿 and industrial 🏭 areas using OpenStr
 """)
 
 # ---------------- OPTIONAL DATE FILTER ----------------
-data_folder = os.path.join(os.path.abspath(__file__), '..', 'files')
+base_dir = os.path.dirname(os.path.abspath(__file__))
+data_folder = os.path.join(base_dir, 'files')
+#data_folder = os.path.join(os.path.abspath(__file__), '..', 'files')
 #data_folder = "E:\\AQI_Dashboard\\files"
 # get all files in folder
 files = [f for f in os.listdir(data_folder) if f.endswith(".csv")]
