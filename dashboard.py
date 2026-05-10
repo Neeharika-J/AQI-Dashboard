@@ -234,13 +234,13 @@ if user_date != "Select":
             st.subheader("Highways around the station")
             highways_m = plot_geo_features_around_station(lat,lon,radius,highway_tags,'yellow')
             st_folium(highways_m, width=700, height=500, key="map_3")
-            highways["identifier"] = (
-                highways["name"]
-                .combine_first(highways["ref"])
-                .fillna("highway segment")
-            )
+            # highways["identifier"] = (
+            #     highways["name"]
+            #     .combine_first(highways["ref"])
+            #     .fillna("highway segment")
+            # )
 
-            highways_nearby = highways['identifier'].dropna().nunique()
+            #highways_nearby = highways['identifier'].dropna().nunique()
             # highways_nearby = highways['name'].nunique()
             
 
