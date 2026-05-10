@@ -55,6 +55,10 @@ if user_date != "Select":
     station_list =  ["Select Station"] + df[df['city']==user_city]['station'].unique().tolist()
     user_station = st.selectbox('Select Station', station_list)
 
+    highways_nearby = None
+    industrial_area_km2 = None
+    green_area_km2 = None
+
     if user_station != 'Select Station':
         df_station = df[df['station']==user_station]
         
