@@ -1,3 +1,4 @@
+from networkx import radius
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -21,7 +22,7 @@ safety_limit = {
     'NO2' : 80,
     'SO2' : 80,
     'CO' : 2,
-    'NH3' : 200 #check
+    'NH3' : 200 
 }
 
 pollutant_palette = {
@@ -122,7 +123,7 @@ def get_utm_epsg(lat, lon):
     zone = int((lon + 180) // 6) + 1
     return 32600 + zone if lat >= 0 else 32700 + zone
 
-def get_geo_features_around_station(lat, lon, radius, tags, feature_geometry='Polygon'):
+def get_geo_features_around_station(geo_features, lat, lon, radius, tags, feature_geometry='Polygon'):
     epsg = get_utm_epsg(lat, lon)
     # Station buffer
     station_point = gpd.GeoSeries([Point(lon, lat)], crs="EPSG:4326").to_crs(epsg=epsg)
@@ -130,7 +131,7 @@ def get_geo_features_around_station(lat, lon, radius, tags, feature_geometry='Po
     buffer_gdf = gpd.GeoDataFrame(geometry=[buffer_geom], crs=f"EPSG:{epsg}")
     try:
         # Fetch OSM features
-        geo_features = ox.features_from_point((lat, lon), tags=tags, dist=radius)
+        geo_features = geo_features.to_crs(epsg=epsg)
         if geo_features.empty:
             return gpd.GeoDataFrame(columns=["geometry"], crs=f"EPSG:{epsg}")
         # Convert geometry types (allow Multi* variants too)
@@ -153,7 +154,6 @@ def get_geo_features_around_station(lat, lon, radius, tags, feature_geometry='Po
 
     except Exception as e :
         return e
-
 
 def plot_geo_features_around_station(lat, lon, radius, tags, color):
     # --- station point ---
@@ -227,11 +227,28 @@ def plot_geo_features_around_station(lat, lon, radius, tags, color):
         ).add_to(m)
 
     # center marker
-    folium.Marker([lat, lon], popup="Location").add_to(m)
+    # folium.Marker([lat, lon], popup="Location").add_to(m)
+    folium.CircleMarker(
+        location=[lat, lon],
+        radius=8,
+        color="black",
+        weight=3,
+        fill=True,
+        fillColor="red",
+        fillOpacity=1,
+        popup=folium.Popup(
+            f"""
+            <b>Monitoring Station</b><br>
+            Latitude: {lat:.6f}<br>
+            Longitude: {lon:.6f}
+            """,
+            max_width=250
+        ),
+        tooltip="Monitoring Station"
+    ).add_to(m)
 
     m.fit_bounds(m.get_bounds())
     return m
-
 
 def create_combined_map(lat, lon, radius, buffer_gdf,
                          parks_gdf=None,
@@ -293,4 +310,567 @@ def create_combined_map(lat, lon, radius, buffer_gdf,
 
     m.fit_bounds(m.get_bounds())
     return m
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_osm_features_cached(lat, lon, radius, tags):
+    """
+    Fetch OSM features from Overpass and cache the result.
+
+    Cache duration:
+        3600 seconds = 1 hour
+    """
+
+    return ox.features_from_point(
+        (lat, lon),
+        tags=tags,
+        dist=radius
+    )
+
+def create_station_feature_map(
+    lat,
+    lon,
+    radius,
+    feature_groups
+):
+    """
+    Create Folium map and calculate feature summaries.
+    """
+
+    # ========================================================
+    # 1. UTM
+    # ========================================================
+
+    epsg = get_utm_epsg(
+        lat,
+        lon
+    )
+
+    # ========================================================
+    # 2. Station point
+    # ========================================================
+
+    station_point = gpd.GeoSeries(
+        [Point(lon, lat)],
+        crs="EPSG:4326"
+    ).to_crs(
+        epsg=epsg
+    )
+
+    # ========================================================
+    # 3. Station buffer
+    # ========================================================
+
+    buffer_geom = (
+        station_point
+        .buffer(radius)
+        .iloc[0]
+    )
+
+    buffer_gdf = gpd.GeoDataFrame(
+        geometry=[buffer_geom],
+        crs=f"EPSG:{epsg}"
+    )
+
+    # ========================================================
+    # 4. CREATE FOLIUM MAP
+    # ========================================================
+
+    m = folium.Map(
+        location=[lat, lon],
+        zoom_start=15,
+        tiles="CartoDB positron",
+
+        # Important for performance
+        prefer_canvas=True,
+
+        # Don't show Leaflet zoom animation
+        zoom_control=True
+    )
+
+    # ========================================================
+    # 5. DISABLE LEAFLET TILE FADE
+    # ========================================================
+
+    # Leaflet normally fades new tiles in.
+    # This can look like a blurry map during zooming.
+
+    disable_animation = folium.Element(
+        """
+        <script>
+        document.addEventListener("DOMContentLoaded", function() {
+
+            setTimeout(function() {
+
+                var maps = document.querySelectorAll(
+                    '.leaflet-container'
+                );
+
+                maps.forEach(function(container) {
+
+                    container.style.transition = "none";
+
+                    var tiles = container.querySelectorAll(
+                        '.leaflet-tile'
+                    );
+
+                    tiles.forEach(function(tile) {
+                        tile.style.transition = "none";
+                        tile.style.opacity = "1";
+                    });
+
+                });
+
+            }, 100);
+
+        });
+        </script>
+        """
+    )
+
+    m.get_root().html.add_child(
+        disable_animation
+    )
+
+    # ========================================================
+    # 6. BUFFER
+    # ========================================================
+
+    buffer_wgs = buffer_gdf.to_crs(
+        epsg=4326
+    )
+
+    folium.GeoJson(
+        buffer_wgs.__geo_interface__,
+        style_function=lambda x: {
+            "fillColor": "none",
+            "color": "red",
+            "weight": 2,
+            "fillOpacity": 0
+        }
+    ).add_to(m)
+
+    # ========================================================
+    # 7. SUMMARY
+    # ========================================================
+
+    area_summary = {}
+
+    # ========================================================
+    # 8. PLOT HELPER
+    # ========================================================
+
+    def plot_gdf(
+        gdf,
+        color,
+        fill=False,
+        weight=2
+    ):
+
+        if gdf is None:
+            return
+
+        if not isinstance(
+            gdf,
+            gpd.GeoDataFrame
+        ):
+            return
+
+        if gdf.empty:
+            return
+
+        gdf_wgs = gdf.to_crs(
+            epsg=4326
+        )
+
+        # ----------------------------------------------------
+        # Instead of creating a Folium object for every
+        # individual geometry, create ONE GeoJSON layer.
+        #
+        # This is much faster for Leaflet.
+        # ----------------------------------------------------
+
+        if fill:
+
+            features = []
+
+            for _, row in gdf_wgs.iterrows():
+
+                geom = row.geometry
+
+                if (
+                    geom is None
+                    or geom.is_empty
+                ):
+                    continue
+
+                features.append({
+                    "type": "Feature",
+                    "geometry": geom.__geo_interface__,
+                    "properties": {}
+                })
+
+            if not features:
+                return
+
+            geojson = {
+                "type": "FeatureCollection",
+                "features": features
+            }
+
+            folium.GeoJson(
+                geojson,
+                style_function=lambda x, c=color: {
+                    "fillColor": c,
+                    "color": c,
+                    "weight": 1,
+                    "fillOpacity": 0.4
+                }
+            ).add_to(m)
+
+            return
+
+        # ----------------------------------------------------
+        # Lines
+        # ----------------------------------------------------
+
+        features = []
+
+        for _, row in gdf_wgs.iterrows():
+
+            geom = row.geometry
+
+            if (
+                geom is None
+                or geom.is_empty
+            ):
+                continue
+
+            features.append({
+                "type": "Feature",
+                "geometry": geom.__geo_interface__,
+                "properties": {}
+            })
+
+        if not features:
+            return
+
+        geojson = {
+            "type": "FeatureCollection",
+            "features": features
+        }
+
+        folium.GeoJson(
+            geojson,
+            style_function=lambda x, c=color, w=weight: {
+                "color": c,
+                "weight": w,
+                "fillOpacity": 0
+            }
+        ).add_to(m)
+
+    # ========================================================
+    # 9. PROCESS FEATURE GROUPS
+    # ========================================================
+
+    for group_name, config in feature_groups.items():
+
+        tags = config.get("tags")
+
+        color = config.get(
+            "color",
+            "blue"
+        )
+
+        geometry_type = config.get(
+            "geometry"
+        )
+
+        # ----------------------------------------------------
+        # GET CACHED OSM DATA
+        # ----------------------------------------------------
+
+        try:
+
+            geo_features = (
+                get_osm_features_cached(
+                    lat,
+                    lon,
+                    radius,
+                    tags
+                )
+            )
+
+        except ox._errors.InsufficientResponseError:
+
+            print(
+                f"No OSM response for {group_name}"
+            )
+
+            continue
+
+        except Exception as e:
+
+            print(
+                f"Error fetching {group_name}: {e}"
+            )
+
+            continue
+
+        if geo_features is None:
+            continue
+
+        if geo_features.empty:
+            continue
+
+        # ----------------------------------------------------
+        # PROJECT TO UTM
+        # ----------------------------------------------------
+
+        geo_features = geo_features.to_crs(
+            epsg=epsg
+        )
+
+        # ----------------------------------------------------
+        # FILTER GEOMETRY
+        # ----------------------------------------------------
+
+        if geometry_type:
+
+            allowed_geometry = {
+                geometry_type,
+                f"Multi{geometry_type}"
+            }
+
+            geo_features = geo_features[
+                geo_features.geom_type.isin(
+                    allowed_geometry
+                )
+            ]
+
+        if geo_features.empty:
+            continue
+
+        # ----------------------------------------------------
+        # CLIP
+        # ----------------------------------------------------
+
+        try:
+
+            clipped_gdf = gpd.clip(
+                geo_features,
+                buffer_gdf
+            )
+
+        except Exception as e:
+
+            print(
+                f"Error clipping {group_name}: {e}"
+            )
+
+            continue
+
+        if (
+            clipped_gdf is None
+            or clipped_gdf.empty
+        ):
+            continue
+
+        # ====================================================
+        # 10. AREA / LENGTH
+        # ====================================================
+
+        if geometry_type in (
+            "LineString",
+            "MultiLineString"
+        ):
+
+            length_m = (
+                clipped_gdf
+                .geometry
+                .length
+                .sum()
+            )
+
+            area_summary[group_name] = {
+                "length_m": float(
+                    length_m
+                ),
+                "length_km": float(
+                    length_m / 1000
+                )
+            }
+
+        else:
+
+            polygon_gdf = clipped_gdf[
+                clipped_gdf.geom_type.isin(
+                    [
+                        "Polygon",
+                        "MultiPolygon"
+                    ]
+                )
+            ]
+
+            if not polygon_gdf.empty:
+
+                total_area_m2 = (
+                    polygon_gdf
+                    .geometry
+                    .area
+                    .sum()
+                )
+
+                area_summary[group_name] = {
+                    "area_m2": float(
+                        total_area_m2
+                    ),
+                    "area_ha": float(
+                        total_area_m2 / 10000
+                    )
+                }
+
+        # ====================================================
+        # 11. SIMPLIFY
+        # ====================================================
+
+        if geometry_type in (
+            "LineString",
+            "MultiLineString"
+        ):
+
+            clipped_gdf = clipped_gdf.copy()
+
+            # Dissolve when possible
+            if "id" in clipped_gdf.columns:
+
+                try:
+
+                    clipped_gdf = (
+                        clipped_gdf
+                        .dissolve(by="id")
+                    )
+
+                except Exception:
+                    pass
+
+            # Simplify geometry
+            clipped_gdf["geometry"] = (
+                clipped_gdf.geometry.simplify(
+                    2,
+                    preserve_topology=True
+                )
+            )
+
+        # ====================================================
+        # 12. ADD TO MAP
+        # ====================================================
+
+        is_polygon = geometry_type in (
+            "Polygon",
+            "MultiPolygon"
+        )
+
+        plot_gdf(
+            clipped_gdf,
+            color=color,
+            fill=is_polygon,
+            weight=2
+        )
+
+    # ========================================================
+    # 13. STATION MARKER
+    # ========================================================
+
+    # folium.Marker(
+    #     location=[
+    #         lat,
+    #         lon
+    #     ],
+    #     popup="Location"
+    # ).add_to(m)
+    # ========================================================
+    # STATION MARKER
+    # ========================================================
+
+    station_marker = folium.Marker(
+        location=[float(lat), float(lon)],
+        tooltip="📍 Monitoring Station",
+        popup=folium.Popup(
+            f"""
+            <div style="font-size:14px;">
+                <b>Monitoring Station</b><br>
+                Latitude: {float(lat):.6f}<br>
+                Longitude: {float(lon):.6f}
+            </div>
+            """,
+            max_width=250
+        ),
+        icon=folium.DivIcon(
+            html="""
+            <div style="
+                width: 24px;
+                height: 24px;
+                background: red;
+                border: 4px solid white;
+                border-radius: 50%;
+                box-shadow: 0 0 0 3px black, 0 2px 8px rgba(0,0,0,0.6);
+                position: relative;
+                left: -12px;
+                top: -12px;
+                z-index: 9999;
+            "></div>
+            """
+        )
+    )
+
+    station_marker.add_to(m)
+
+    # ========================================================
+    # 14. FIT BOUNDS
+    # ========================================================
+
+    minx, miny, maxx, maxy = (
+        buffer_wgs.total_bounds
+    )
+
+    m.fit_bounds(
+        [
+            [miny, minx],
+            [maxy, maxx]
+        ],
+        padding=(20, 20)
+    )
+
+    # ========================================================
+    # 15. RETURN
+    # ========================================================
+
+    return (
+        m,
+        area_summary
+    )
+
+
+@st.cache_resource(
+    ttl=3600,
+    show_spinner=False
+)
+def get_cached_station_map(
+    lat,
+    lon,
+    radius,
+    feature_groups
+):
+    """
+    Cache the completed Folium map.
+
+    This is different from caching the OSM data.
+    """
+
+    return create_station_feature_map(
+        lat,
+        lon,
+        radius,
+        feature_groups
+    )
 
